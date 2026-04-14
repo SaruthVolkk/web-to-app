@@ -302,6 +302,7 @@ class ApkTemplate(private val context: Context) {
             },
             "deepLinkEnabled": ${config.deepLinkEnabled},
             "deepLinkHosts": [${config.deepLinkHosts.joinToString(",") { "\"${escapeJson(it)}\"" }}],
+            "deepLinkSchemes": [${config.deepLinkSchemes.joinToString(",") { "\"${escapeJson(it)}\"" }}],
             "phpAppConfig": {
                 "framework": "${escapeJson(config.phpAppFramework)}",
                 "documentRoot": "${escapeJson(config.phpAppDocumentRoot)}",
@@ -703,6 +704,7 @@ data class ApkConfig(
     // Deep link配置
     val deepLinkEnabled: Boolean = false,       // 是否启用链接打开
     val deepLinkHosts: List<String> = emptyList(), // 匹配的域名列表
+    val deepLinkSchemes: List<String> = emptyList(), // 匹配的协议列表 (myapp://)
     
     // WordPress 配置
     val wordpressSiteTitle: String = "",       // 站点标题

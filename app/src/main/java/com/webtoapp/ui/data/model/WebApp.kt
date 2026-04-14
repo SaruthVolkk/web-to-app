@@ -1097,6 +1097,7 @@ data class ApkExportConfig(
     val engineType: String = "SYSTEM_WEBVIEW",   // 浏览器引擎类型: SYSTEM_WEBVIEW, GECKOVIEW
     val deepLinkEnabled: Boolean = false,         // 是否启用Deep Link（链接打开）
     val customDeepLinkHosts: List<String> = emptyList(), // 用户自定义的额外 Deep Link 域名
+    val customDeepLinkSchemes: List<String> = emptyList(), // 用户自定义的额外 Deep Link 协议 (如 myapp://)
     val performanceOptimization: Boolean = false,  // 性能优化（资源压缩/构建加速/加载提速）
     val performanceConfig: PerformanceOptimizationConfig = PerformanceOptimizationConfig()  // 性能优化详细配置
 )

@@ -654,7 +654,8 @@ class ApkBuilder(private val context: Context) {
                                 config.versionName,
                                 aliasCount,
                                 config.appName,
-                                config.deepLinkHosts
+                                config.deepLinkHosts,
+                                config.deepLinkSchemes
                             )
                             writeEntryDeflated(zipOut, entry.name, modifiedData)
                             if (aliasCount > 0) {
@@ -2261,12 +2262,14 @@ fun WebApp.toApkConfig(packageName: String): ApkConfig {
         // Browser engine config
         engineType = apkExportConfig?.engineType ?: "SYSTEM_WEBVIEW",
         // Deep link config
-        deepLinkEnabled = apkExportConfig?.deepLinkEnabled ?: false,
+        deepLinkEnabled = apkExportConfig?.deepLinkEnabled == true || 
+                        (apkExportConfig?.customDeepLinkSchemes?.isNotEmpty() ?: false),
         deepLinkHosts = if (apkExportConfig?.deepLinkEnabled == true) {
             extractHostsFromUrl(url, apkExportConfig.customDeepLinkHosts)
         } else {
             emptyList()
         },
+        deepLinkSchemes = apkExportConfig?.customDeepLinkSchemes ?: emptyList(),
         // WordPress config
         wordpressSiteTitle = wordpressConfig?.siteTitle ?: "",
         wordpressPhpPort = wordpressConfig?.phpPort ?: 0,

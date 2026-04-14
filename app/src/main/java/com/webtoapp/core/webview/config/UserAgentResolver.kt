@@ -7,6 +7,17 @@ import com.webtoapp.core.logging.AppLogger
 import com.webtoapp.data.model.UserAgentMode
 import com.webtoapp.data.model.WebViewConfig
 
+/**
+ * Strips the Android WebView `wv` marker from a user agent string.
+ *
+ * Google OAuth blocks WebViews that advertise `wv` in the UA with
+ * 403 disallowed_useragent. Removing it allows the OAuth flow to
+ * proceed inside the WebView, keeping sessionStorage intact across
+ * the entire redirect flow.
+ */
+internal fun stripWebViewMarker(ua: String): String =
+    ua.replace(Regex("""\s*\bwv\b"""), "").trim()
+
 internal data class DynamicUserAgents(
     val desktopUserAgent: String,
     val strictCompatMobileUserAgent: String
@@ -61,7 +72,18 @@ internal class UserAgentResolver(
         }
 
         when (config.userAgentMode) {
-            UserAgentMode.DEFAULT -> Unit
+            UserAgentMode.DEFAULT -> {
+                // Strip the `wv` WebView marker so Google OAuth is not blocked.
+                // The system default UA is returned as-is when there is no `wv`.
+                val systemUa = runCatching { WebSettings.getDefaultUserAgent(context) }.getOrNull()
+                if (systemUa != null) {
+                    val cleaned = stripWebViewMarker(systemUa)
+                    if (cleaned != systemUa) {
+                        AppLogger.d("WebViewManager", "resolveUserAgent: DEFAULT mode, stripped 'wv' -> ${cleaned.take(80)}")
+                        return cleaned
+                    }
+                }
+            }
             UserAgentMode.CUSTOM -> {
                 val ua = config.customUserAgent?.takeIf { it.isNotBlank() }
                 AppLogger.d("WebViewManager", "resolveUserAgent: CUSTOM mode -> ${ua?.take(60) ?: "null"}")

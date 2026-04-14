@@ -39,6 +39,7 @@ class AxmlRebuilder {
         private const val ATTR_ENABLED = 0x0101000e
         private const val ATTR_SCHEME = 0x01010027
         private const val ATTR_HOST = 0x01010028
+        private const val ATTR_AUTO_VERIFY = 0x0101045e
         
         // Pre-compiled regex for class name detection (avoid creating per string pool entry)
         private val CLASS_NAME_REGEX = Regex("^[A-Z][a-zA-Z0-9]*$")
@@ -464,8 +465,8 @@ class AxmlRebuilder {
      * 添加 Deep Link intent-filter 到 ShellActivity
      * 在 ShellActivity 的 <activity> 元素内插入 intent-filter，包含 ACTION_VIEW + BROWSABLE + DEFAULT + data(scheme+host)
      */
-    private fun addDeepLinkIntentFilter(parsed: ParsedAxml, hosts: List<String>) {
-        if (hosts.isEmpty()) return
+    private fun addDeepLinkIntentFilter(parsed: ParsedAxml, hosts: List<String>, schemes: List<String> = emptyList()) {
+        if (hosts.isEmpty() && schemes.isEmpty()) return
         
         val resourceMap = parsed.resourceMap
         if (resourceMap == null) {
@@ -509,61 +510,202 @@ class AxmlRebuilder {
             AppLogger.d(TAG, "Added host to string pool and resource map at index $hostAttrIndex")
         }
         
-        // Re-read indices after potential insertions
-        val currentNameAttrIndex = parsed.resourceMap!!.indexOf(ATTR_NAME)
-        val currentSchemeAttrIndex = parsed.resourceMap!!.indexOf(ATTR_SCHEME)
-        val currentHostAttrIndex = parsed.resourceMap!!.indexOf(ATTR_HOST)
-        
-        val androidNsIndex = getOrAddString(parsed.stringPool, "http://schemas.android.com/apk/res/android")
-        val intentFilterNameIndex = getOrAddString(parsed.stringPool, "intent-filter")
-        val actionNameIndex = getOrAddString(parsed.stringPool, "action")
-        val categoryNameIndex = getOrAddString(parsed.stringPool, "category")
-        val dataNameIndex = getOrAddString(parsed.stringPool, "data")
-        
-        val viewActionIndex = getOrAddString(parsed.stringPool, "android.intent.action.VIEW")
-        val defaultCategoryIndex = getOrAddString(parsed.stringPool, "android.intent.category.DEFAULT")
-        val browsableCategoryIndex = getOrAddString(parsed.stringPool, "android.intent.category.BROWSABLE")
-        val httpsSchemeIndex = getOrAddString(parsed.stringPool, "https")
-        val httpSchemeIndex = getOrAddString(parsed.stringPool, "http")
-        
-        val newChunks = mutableListOf<Chunk>()
-        
-        // <intent-filter>
-        newChunks.add(buildSimpleStartElement(androidNsIndex, intentFilterNameIndex, 0))
-        
-        // <action android:name="android.intent.action.VIEW" />
-        newChunks.add(buildActionOrCategoryElement(androidNsIndex, actionNameIndex, currentNameAttrIndex, viewActionIndex))
-        newChunks.add(buildEndElement(androidNsIndex, actionNameIndex))
-        
-        // <category android:name="android.intent.category.DEFAULT" />
-        newChunks.add(buildActionOrCategoryElement(androidNsIndex, categoryNameIndex, currentNameAttrIndex, defaultCategoryIndex))
-        newChunks.add(buildEndElement(androidNsIndex, categoryNameIndex))
-        
-        // <category android:name="android.intent.category.BROWSABLE" />
-        newChunks.add(buildActionOrCategoryElement(androidNsIndex, categoryNameIndex, currentNameAttrIndex, browsableCategoryIndex))
-        newChunks.add(buildEndElement(androidNsIndex, categoryNameIndex))
-        
-        // For each host, add <data> elements for both https and http
-        for (host in hosts) {
-            val hostValueIndex = getOrAddString(parsed.stringPool, host)
-            // <data android:scheme="https" android:host="xxx" />
-            newChunks.add(buildDataElement(androidNsIndex, dataNameIndex, currentSchemeAttrIndex, httpsSchemeIndex, currentHostAttrIndex, hostValueIndex))
-            newChunks.add(buildEndElement(androidNsIndex, dataNameIndex))
-            // <data android:scheme="http" android:host="xxx" />
-            newChunks.add(buildDataElement(androidNsIndex, dataNameIndex, currentSchemeAttrIndex, httpSchemeIndex, currentHostAttrIndex, hostValueIndex))
-            newChunks.add(buildEndElement(androidNsIndex, dataNameIndex))
+        // Ensure android:autoVerify exists in resource map
+        var autoVerifyAttrIndex = parsed.resourceMap!!.indexOf(ATTR_AUTO_VERIFY)
+        if (autoVerifyAttrIndex < 0) {
+            autoVerifyAttrIndex = parsed.resourceMap!!.size
+            parsed.stringPool.strings.add(autoVerifyAttrIndex, "autoVerify")
+            updateStringIndicesAfterInsert(parsed, autoVerifyAttrIndex)
+            val newResourceMap3 = parsed.resourceMap!!.copyOf(parsed.resourceMap!!.size + 1)
+            newResourceMap3[autoVerifyAttrIndex] = ATTR_AUTO_VERIFY
+            parsed.resourceMap = newResourceMap3
+            AppLogger.d(TAG, "Added autoVerify to string pool and resource map at index $autoVerifyAttrIndex")
         }
-        
-        // </intent-filter>
-        newChunks.add(buildEndElement(androidNsIndex, intentFilterNameIndex))
+
+        // Re-read all indices after any insertions above
+        val finalNameAttrIndex = parsed.resourceMap!!.indexOf(ATTR_NAME)
+        val finalSchemeAttrIndex = parsed.resourceMap!!.indexOf(ATTR_SCHEME)
+        val finalHostAttrIndex = parsed.resourceMap!!.indexOf(ATTR_HOST)
+        val finalAutoVerifyAttrIndex = parsed.resourceMap!!.indexOf(ATTR_AUTO_VERIFY)
+        val finalAndroidNsIndex = getOrAddString(parsed.stringPool, "http://schemas.android.com/apk/res/android")
+        val finalIntentFilterNameIndex = getOrAddString(parsed.stringPool, "intent-filter")
+
+        val newChunks = mutableListOf<Chunk>()
+
+        // 1. Separate intent-filter for HTTP/HTTPS hosts (with autoVerify="true" for App Links)
+        if (hosts.isNotEmpty()) {
+            newChunks.add(buildIntentFilterWithAutoVerify(finalAndroidNsIndex, finalIntentFilterNameIndex, finalAutoVerifyAttrIndex))
+            
+            val actionNameIndex2 = getOrAddString(parsed.stringPool, "action")
+            val categoryNameIndex2 = getOrAddString(parsed.stringPool, "category")
+            val dataNameIndex2 = getOrAddString(parsed.stringPool, "data")
+            val viewActionIndex2 = getOrAddString(parsed.stringPool, "android.intent.action.VIEW")
+            val defaultCategoryIndex2 = getOrAddString(parsed.stringPool, "android.intent.category.DEFAULT")
+            val browsableCategoryIndex2 = getOrAddString(parsed.stringPool, "android.intent.category.BROWSABLE")
+            val httpsSchemeIndex2 = getOrAddString(parsed.stringPool, "https")
+            val httpSchemeIndex2 = getOrAddString(parsed.stringPool, "http")
+
+            // <action android:name="android.intent.action.VIEW" />
+            newChunks.add(buildActionOrCategoryElement(finalAndroidNsIndex, actionNameIndex2, finalNameAttrIndex, viewActionIndex2))
+            newChunks.add(buildEndElement(finalAndroidNsIndex, actionNameIndex2))
+
+            // <category android:name="android.intent.category.DEFAULT" />
+            newChunks.add(buildActionOrCategoryElement(finalAndroidNsIndex, categoryNameIndex2, finalNameAttrIndex, defaultCategoryIndex2))
+            newChunks.add(buildEndElement(finalAndroidNsIndex, categoryNameIndex2))
+
+            // <category android:name="android.intent.category.BROWSABLE" />
+            newChunks.add(buildActionOrCategoryElement(finalAndroidNsIndex, categoryNameIndex2, finalNameAttrIndex, browsableCategoryIndex2))
+            newChunks.add(buildEndElement(finalAndroidNsIndex, categoryNameIndex2))
+
+            for (host in hosts) {
+                val hostValueIndex = getOrAddString(parsed.stringPool, host)
+                // <data android:scheme="https" android:host="xxx" />
+                newChunks.add(buildDataElement(finalAndroidNsIndex, dataNameIndex2, finalSchemeAttrIndex, httpsSchemeIndex2, finalHostAttrIndex, hostValueIndex))
+                newChunks.add(buildEndElement(finalAndroidNsIndex, dataNameIndex2))
+                // <data android:scheme="http" android:host="xxx" />
+                newChunks.add(buildDataElement(finalAndroidNsIndex, dataNameIndex2, finalSchemeAttrIndex, httpSchemeIndex2, finalHostAttrIndex, hostValueIndex))
+                newChunks.add(buildEndElement(finalAndroidNsIndex, dataNameIndex2))
+            }
+
+            newChunks.add(buildEndElement(finalAndroidNsIndex, finalIntentFilterNameIndex))
+        }
+
+        // 2. Separate intent-filter for custom schemes (e.g. myapp://)
+        val filteredSchemes = schemes.filter { it.isNotBlank() }
+
+        if (filteredSchemes.isNotEmpty()) {
+            newChunks.add(buildSimpleStartElement(finalAndroidNsIndex, finalIntentFilterNameIndex, 0))
+
+            val actionNameIndex3 = getOrAddString(parsed.stringPool, "action")
+            val categoryNameIndex3 = getOrAddString(parsed.stringPool, "category")
+            val dataNameIndex3 = getOrAddString(parsed.stringPool, "data")
+            val viewActionIndex3 = getOrAddString(parsed.stringPool, "android.intent.action.VIEW")
+            val defaultCategoryIndex3 = getOrAddString(parsed.stringPool, "android.intent.category.DEFAULT")
+            val browsableCategoryIndex3 = getOrAddString(parsed.stringPool, "android.intent.category.BROWSABLE")
+
+            // <action android:name="android.intent.action.VIEW" />
+            newChunks.add(buildActionOrCategoryElement(finalAndroidNsIndex, actionNameIndex3, finalNameAttrIndex, viewActionIndex3))
+            newChunks.add(buildEndElement(finalAndroidNsIndex, actionNameIndex3))
+
+            // <category android:name="android.intent.category.DEFAULT" />
+            newChunks.add(buildActionOrCategoryElement(finalAndroidNsIndex, categoryNameIndex3, finalNameAttrIndex, defaultCategoryIndex3))
+            newChunks.add(buildEndElement(finalAndroidNsIndex, categoryNameIndex3))
+
+            // <category android:name="android.intent.category.BROWSABLE" />
+            newChunks.add(buildActionOrCategoryElement(finalAndroidNsIndex, categoryNameIndex3, finalNameAttrIndex, browsableCategoryIndex3))
+            newChunks.add(buildEndElement(finalAndroidNsIndex, categoryNameIndex3))
+
+            for (scheme in filteredSchemes) {
+                val schemeValueIndex = getOrAddString(parsed.stringPool, scheme)
+                // <data android:scheme="xxx" /> — must use buildDataElement (scheme only), not buildActionOrCategoryElement
+                newChunks.add(buildSchemeOnlyDataElement(finalAndroidNsIndex, dataNameIndex3, finalSchemeAttrIndex, schemeValueIndex))
+                newChunks.add(buildEndElement(finalAndroidNsIndex, dataNameIndex3))
+            }
+
+            newChunks.add(buildEndElement(finalAndroidNsIndex, finalIntentFilterNameIndex))
+        }
         
         // Insert before ShellActivity's </activity>
         // Re-find because indices may have shifted from alias additions
         val currentEndIndex = findActivityEndIndex(parsed, "com.webtoapp.ui.shell.ShellActivity")
         if (currentEndIndex >= 0) {
             parsed.chunks.addAll(currentEndIndex, newChunks)
-            AppLogger.d(TAG, "Inserted ${newChunks.size} chunks for deep link intent-filter")
+            AppLogger.d(TAG, "Inserted ${newChunks.size} chunks for deep link intent-filter (hosts=${hosts.size}, schemes=${schemes.size})")
         }
+    }
+    
+    /**
+     * 确保 ShellActivity 已导出（android:exported="true"）
+     * 否则外部 Deep Link 无法启动该 Activity
+     */
+    private fun ensureShellActivityExported(parsed: ParsedAxml) {
+        val resourceMap = parsed.resourceMap ?: return
+        val exportedAttrIndex = resourceMap.indexOf(ATTR_EXPORTED)
+        if (exportedAttrIndex < 0) {
+            AppLogger.w(TAG, "android:exported not in resource map, cannot force export ShellActivity. This is unexpected.")
+            return
+        }
+        
+        // 查找 activity 字符串索引
+        val activityStrIndex = parsed.stringPool.strings.indexOf("activity")
+        if (activityStrIndex < 0) return
+        
+        val nameAttrIndex = resourceMap.indexOf(ATTR_NAME)
+        if (nameAttrIndex < 0) return
+        
+        val targetClassName = "com.webtoapp.ui.shell.ShellActivity"
+        AppLogger.d(TAG, "Ensuring $targetClassName is exported (exportedAttrIndex=$exportedAttrIndex)")
+        
+        for (chunk in parsed.chunks) {
+            if (chunk.type == CHUNK_START_ELEMENT) {
+                val buffer = ByteBuffer.wrap(chunk.data).order(ByteOrder.LITTLE_ENDIAN)
+                buffer.position(16)
+                buffer.int // Skip namespace
+                val nameIdx = buffer.int
+                if (nameIdx != activityStrIndex) continue
+                
+                val attrStart = buffer.short.toInt() and 0xFFFF
+                val attrSize = buffer.short.toInt() and 0xFFFF
+                val attrCount = buffer.short.toInt() and 0xFFFF
+                
+                // 检查是否为 ShellActivity (通过 android:name)
+                // Attributes start at byte 36 in chunk.data:
+                //   16 (chunk+node header) + 20 (attrExt struct) = 36
+                // attrStart read from binary is relative to the attrExt base (16),
+                // so the correct absolute base is 16 + attrStart (= 36 when attrStart=0x14).
+                val attrBase = 16 + attrStart
+                var isShellActivity = false
+                for (i in 0 until attrCount) {
+                    val offset = attrBase + i * attrSize
+                    if (offset + 12 > chunk.data.size) break
+
+                    buffer.position(offset + 4) // Skip namespace
+                    val attrNameIdx = buffer.int
+                    if (attrNameIdx == nameAttrIndex) {
+                        val attrValueIdx = buffer.int
+                        val actualName = parsed.stringPool.strings.getOrNull(attrValueIdx)
+                        if (actualName == targetClassName) {
+                            isShellActivity = true
+                            break
+                        }
+                    }
+                }
+
+                if (isShellActivity) {
+                    var exportedFound = false
+                    for (j in 0 until attrCount) {
+                        val dataOffset = attrBase + j * attrSize
+                        val attrNameIdx = buffer.getInt(dataOffset + 4)
+                        val resourceId = if (attrNameIdx >= 0 && attrNameIdx < parsed.resourceMap?.size ?: 0) {
+                            parsed.resourceMap!![attrNameIdx]
+                        } else 0
+                        
+                        if (resourceId == ATTR_EXPORTED) {
+                            AppLogger.d(TAG, "Forcing ShellActivity android:exported=true (offset: ${dataOffset})")
+                            
+                            // Standard Attribute Structure:
+                            // NS(4) + Name(4) + rawValue(4) + [Size(2) + Zero(1) + Type(1)] + Data(4)
+                            
+                            // 1. Update rawValue (index 8-11) - Use -1 for booleans
+                            buffer.putInt(dataOffset + 8, -1)
+                            
+                            // 2. Update valueType (index 15) - TYPE_INT_BOOLEAN (0x12)
+                            buffer.put(dataOffset + 15, 0x12.toByte())
+                            
+                            // 3. Update valueData (index 16-19) - true (-1)
+                            buffer.putInt(dataOffset + 16, -1)
+                            
+                            exportedFound = true
+                            break
+                        }
+                    }
+                    if (!exportedFound) {
+                        AppLogger.w(TAG, "ShellActivity found but android:exported attribute missing in START_ELEMENT to modify")
+                    }
+                }
+            }
+        }
+        AppLogger.w(TAG, "Could not find ShellActivity START_ELEMENT to force exported=true")
     }
     
     /**
@@ -790,6 +932,82 @@ class AxmlRebuilder {
         return Chunk(CHUNK_START_ELEMENT, 0, chunkSize, buffer.array())
     }
     
+    /**
+     * 构建带 android:autoVerify="true" 的 <intent-filter> START_ELEMENT
+     * App Links (HTTP/HTTPS) 必须设置此属性才能在 Android 12+ 触发 "Open in app" 提示
+     */
+    private fun buildIntentFilterWithAutoVerify(androidNsIndex: Int, elementNameIndex: Int, autoVerifyAttrIndex: Int): Chunk {
+        val attrCount = 1
+        val attrSize = 20
+        val chunkSize = 36 + attrCount * attrSize
+
+        val buffer = ByteBuffer.allocate(chunkSize).order(ByteOrder.LITTLE_ENDIAN)
+        buffer.putShort(CHUNK_START_ELEMENT.toShort())
+        buffer.putShort(16) // headerSize
+        buffer.putInt(chunkSize)
+        buffer.putInt(0)   // lineNumber
+        buffer.putInt(-1)  // comment
+        buffer.putInt(-1)  // namespaceUri
+        buffer.putInt(elementNameIndex)
+        buffer.putShort(20) // attributeStart
+        buffer.putShort(attrSize.toShort())
+        buffer.putShort(attrCount.toShort())
+        buffer.putShort(0) // idIndex
+        buffer.putShort(0) // classIndex
+        buffer.putShort(0) // styleIndex
+
+        // android:autoVerify="true" (TYPE_INT_BOOLEAN = 0x12, value -1 = true)
+        buffer.putInt(androidNsIndex)      // namespace
+        buffer.putInt(autoVerifyAttrIndex) // name index
+        buffer.putInt(-1)                  // rawValue (-1 for booleans)
+        buffer.putShort(8)                 // valueSize
+        buffer.put(0)                      // res0
+        buffer.put(0x12)                   // TYPE_INT_BOOLEAN
+        buffer.putInt(-1)                  // valueData: true
+
+        return Chunk(CHUNK_START_ELEMENT, 0, chunkSize, buffer.array())
+    }
+
+    /**
+     * 构建只有 android:scheme 属性的 <data> START_ELEMENT (用于自定义协议 deep link)
+     */
+    private fun buildSchemeOnlyDataElement(
+        androidNsIndex: Int,
+        elementNameIndex: Int,
+        schemeAttrIndex: Int,
+        schemeValueIndex: Int
+    ): Chunk {
+        val attrCount = 1
+        val attrSize = 20
+        val chunkSize = 36 + attrCount * attrSize
+
+        val buffer = ByteBuffer.allocate(chunkSize).order(ByteOrder.LITTLE_ENDIAN)
+        buffer.putShort(CHUNK_START_ELEMENT.toShort())
+        buffer.putShort(16)
+        buffer.putInt(chunkSize)
+        buffer.putInt(0)
+        buffer.putInt(-1)
+        buffer.putInt(-1) // namespaceUri
+        buffer.putInt(elementNameIndex)
+        buffer.putShort(20)
+        buffer.putShort(attrSize.toShort())
+        buffer.putShort(attrCount.toShort())
+        buffer.putShort(0)
+        buffer.putShort(0)
+        buffer.putShort(0)
+
+        // android:scheme (TYPE_STRING = 0x03)
+        buffer.putInt(androidNsIndex)
+        buffer.putInt(schemeAttrIndex)
+        buffer.putInt(schemeValueIndex)
+        buffer.putShort(8)
+        buffer.put(0)
+        buffer.put(0x03) // TYPE_STRING
+        buffer.putInt(schemeValueIndex)
+
+        return Chunk(CHUNK_START_ELEMENT, 0, chunkSize, buffer.array())
+    }
+
     /**
      * 构建简单的 START_ELEMENT (无属性或少量属性)
      */
@@ -1053,7 +1271,8 @@ class AxmlRebuilder {
         versionName: String,
         aliasCount: Int = 0,
         appName: String = "",
-        deepLinkHosts: List<String> = emptyList()
+        deepLinkHosts: List<String> = emptyList(),
+        deepLinkSchemes: List<String> = emptyList()
     ): ByteArray {
         return try {
             val parsed = parseAxml(axmlData)
@@ -1071,16 +1290,13 @@ class AxmlRebuilder {
                 expandClassNames(parsed, expansions)
             }
             
-            // 步骤3：修改包名和所有包名前缀的字符串
-            replacePackageString(parsed, originalPackage, newPackage)
-            
-            // 步骤4：修改版本号
+            // 步骤3：修改版本号
             modifyVersionInfo(parsed, versionCode, versionName)
             
-            // 步骤5：移除 testOnly 标记
+            // 步骤4：移除 testOnly 标记
             stripTestOnlyFlag(parsed)
             
-            // 步骤5.5：确保关键权限存在（避免模板缺失导致功能不可用）
+            // 步骤5：确保关键权限存在（避免模板缺失导致功能不可用）
             ensureUsesPermissions(parsed, ALL_REQUIRED_PERMISSIONS)
             
             // 步骤6：添加 activity-alias（多桌面图标）
@@ -1089,16 +1305,22 @@ class AxmlRebuilder {
                 AppLogger.d(TAG, "Added $aliasCount activity-alias entries for multi-launcher-icons")
             }
             
+            // 步骤6.5：确保 ShellActivity 已导出，否则 Deep Link 无法工作
+            ensureShellActivityExported(parsed)
+            
             // 步骤7：添加 Deep Link intent-filter（链接打开）
-            if (deepLinkHosts.isNotEmpty()) {
-                addDeepLinkIntentFilter(parsed, deepLinkHosts)
-                AppLogger.d(TAG, "Added deep link intent-filter for hosts: $deepLinkHosts")
+            if (deepLinkHosts.isNotEmpty() || deepLinkSchemes.isNotEmpty()) {
+                addDeepLinkIntentFilter(parsed, deepLinkHosts, deepLinkSchemes)
+                AppLogger.d(TAG, "Added deep link intent-filter for hosts: $deepLinkHosts, schemes: $deepLinkSchemes")
             }
+            
+            // 步骤7.5：修改包名和所有包名前缀的字符串（放在最后，避免破坏前面的搜索逻辑）
+            replacePackageString(parsed, originalPackage, newPackage)
             
             // 步骤8：重建 AXML
             val result = rebuildAxml(parsed)
             
-            AppLogger.d(TAG, "AXML full rebuild complete: original=${axmlData.size}, new=${result.size}, aliases=$aliasCount, deepLinkHosts=${deepLinkHosts.size}")
+            AppLogger.d(TAG, "AXML full rebuild complete: original=${axmlData.size}, new=${result.size}, aliases=$aliasCount, deepLinkHosts=${deepLinkHosts.size}, deepLinkSchemes=${deepLinkSchemes.size}")
             result
             
         } catch (e: Exception) {
@@ -1140,17 +1362,17 @@ class AxmlRebuilder {
                 expandClassNames(parsed, expansions)
             }
             
-            // 步骤3：修改包名和所有包名前缀的字符串（权限、authorities 等）
-            replacePackageString(parsed, originalPackage, newPackage)
-            
-            // 步骤4：修改版本号
+            // 步骤3：修改版本号
             modifyVersionInfo(parsed, versionCode, versionName)
             
-            // 步骤5：移除 testOnly 标记，避免 INSTALL_FAILED_TEST_ONLY
+            // 步骤4：移除 testOnly 标记，避免 INSTALL_FAILED_TEST_ONLY
             stripTestOnlyFlag(parsed)
             
-            // 步骤5.5：确保关键权限存在
+            // 步骤5：确保关键权限存在
             ensureUsesPermissions(parsed, ALL_REQUIRED_PERMISSIONS)
+            
+            // 步骤6：修改包名和所有包名前缀的字符串（放在最后）
+            replacePackageString(parsed, originalPackage, newPackage)
             
             // 步骤6：重建 AXML
             val result = rebuildAxml(parsed)
@@ -1435,7 +1657,7 @@ class AxmlRebuilder {
     }
 
     /**
-     * 解析资源 ID 映射
+     * 解析 资源 ID 映射
      */
     private fun parseResourceMap(data: ByteArray, offset: Int, size: Int): IntArray {
         val buffer = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
@@ -1568,33 +1790,33 @@ class AxmlRebuilder {
      */
     private fun replacePackageString(parsed: ParsedAxml, oldPackage: String, newPackage: String) {
         val stringPool = parsed.stringPool
+        var modifiedCount = 0
         
         for (i in stringPool.strings.indices) {
             val str = stringPool.strings[i]
             
-            when {
-                // 1. 完全匹配的包名（package 属性）
-                str == oldPackage -> {
-                    stringPool.strings[i] = newPackage
-                    AppLogger.d(TAG, "Replaced package at index $i: '$oldPackage' -> '$newPackage'")
-                }
+            // 1. 如果完全相等，直接替换
+            if (str == oldPackage) {
+                AppLogger.d(TAG, "Replacing exact package name: $str -> $newPackage")
+                stringPool.strings[i] = newPackage
+                modifiedCount++
+                continue
+            }
+            
+            // 2. 如果是以 oldPackage 为前缀的子包或类名
+            if (str.startsWith("$oldPackage.")) {
+                val suffix = str.substring(oldPackage.length) // includes the dot
+                // 如果后缀看起来像是一个组件（Activity/Service等），则不替换
+                // 只有非类名的包名路径才替换（例如权限名、action名等）
+                val isComponentClassName = isLikelyClassName(suffix)
                 
-                // 2. 以包名开头的字符串（权限、authorities 等）
-                // 但排除组件类名（Activity、Service、Provider、Receiver、Application等）
-                str.startsWith("$oldPackage.") -> {
-                    // Check是否是组件类名（通常以大写字母开头的类名结尾）
-                    val suffix = str.substring(oldPackage.length + 1)
-                    val isComponentClassName = isLikelyClassName(suffix)
-                    
-                    if (isComponentClassName) {
-                        // 组件类名不替换，保持原样
-                        AppLogger.d(TAG, "Skipped component class at index $i: '$str'")
-                    } else {
-                        // Permission、authorities等需要替换
-                        val newStr = newPackage + str.substring(oldPackage.length)
-                        stringPool.strings[i] = newStr
-                        AppLogger.d(TAG, "Replaced prefixed string at index $i: '$str' -> '$newStr'")
-                    }
+                if (isComponentClassName) {
+                    AppLogger.v(TAG, "Skipped component class in replacement: $str")
+                } else {
+                    val replaced = newPackage + suffix
+                    stringPool.strings[i] = replaced
+                    modifiedCount++
+                    AppLogger.d(TAG, "Replaced prefixed string at index $i: '$str' -> '$replaced'")
                 }
             }
         }

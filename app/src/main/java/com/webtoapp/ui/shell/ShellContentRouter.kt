@@ -204,7 +204,10 @@ fun ShellContentRouter(
                                 webViewCallbacks,
                                 config.extensionModuleIds,
                                 config.embeddedExtensionModules,
-                                config.extensionFabIcon, allowGlobalModuleFallback = false)
+                                config.extensionFabIcon,
+                                allowGlobalModuleFallback = false,
+                                appBaseUrl = config.targetUrl,
+                                appDeepLinkSchemes = config.deepLinkSchemes)
 
                             // 添加长按监听器
                             // 持续跟踪触摸位置，确保长按时使用最新坐标
@@ -301,7 +304,10 @@ fun ShellLocalFileWebView(
                         webViewCallbacks,
                         config.extensionModuleIds,
                         config.embeddedExtensionModules,
-                        config.extensionFabIcon, allowGlobalModuleFallback = false)
+                        config.extensionFabIcon,
+                        allowGlobalModuleFallback = false,
+                        appBaseUrl = config.targetUrl,
+                        appDeepLinkSchemes = config.deepLinkSchemes)
                     // 然后覆盖本地文件特定的设置（必须在 configureWebView 之后）
                     // 因为 configureWebView 会将 allowFileAccessFromFileURLs 设为 false
                     settings.apply {

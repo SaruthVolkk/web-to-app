@@ -399,12 +399,16 @@ class ShellActivity : AppCompatActivity() {
         }
 
         // Check deep link intent data（with domain validation）
-        val intentUrl = intent?.data?.toString()
+        // Use intent.dataString (raw original URI string) instead of intent.data.toString()
+        // because Uri.toString() reconstructs from parsed components, mangling URLs
+        val intentUrl = intent?.dataString ?: intent?.data?.toString()
         if (!intentUrl.isNullOrBlank() && intent?.action == Intent.ACTION_VIEW) {
             val safeUrl = normalizeShellTargetUrlForSecurity(intentUrl)
             val validatedUrl = if (config.deepLinkEnabled) {
-                validateDeepLinkUrl(safeUrl, config.deepLinkHosts, config.targetUrl)
-            } else safeUrl
+                validateDeepLinkUrl(safeUrl, config.deepLinkHosts, config.targetUrl, config.deepLinkSchemes)
+            } else {
+                resolveDeepLinkToWebUrl(safeUrl, config.deepLinkSchemes, config.targetUrl)
+            }
             deepLinkUrl.value = validatedUrl
             com.webtoapp.core.shell.ShellLogger.i("ShellActivity", "收到 Deep Link: $validatedUrl (原始: $intentUrl)")
         }
@@ -527,14 +531,17 @@ class ShellActivity : AppCompatActivity() {
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
-        val url = intent?.data?.toString()
+        // Same reason as onCreate: use dataString to avoid Uri reconstruction mangling
+        val url = intent?.dataString ?: intent?.data?.toString()
         if (!url.isNullOrBlank() && intent?.action == Intent.ACTION_VIEW) {
             val safeUrl = normalizeShellTargetUrlForSecurity(url)
             // 验证 Deep Link 域名白名单
             val config = WebToAppApplication.shellMode.getConfig()
             val validatedUrl = if (config?.deepLinkEnabled == true) {
-                validateDeepLinkUrl(safeUrl, config.deepLinkHosts, config.targetUrl)
-            } else safeUrl
+                validateDeepLinkUrl(safeUrl, config.deepLinkHosts, config.targetUrl, config.deepLinkSchemes)
+            } else {
+                resolveDeepLinkToWebUrl(safeUrl, config?.deepLinkSchemes ?: emptyList(), config?.targetUrl ?: safeUrl)
+            }
             deepLinkUrl.value = validatedUrl
             // Directly load URL in existing WebView
             webView?.loadUrl(validatedUrl)

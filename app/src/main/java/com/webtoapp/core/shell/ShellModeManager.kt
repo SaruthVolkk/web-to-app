@@ -373,6 +373,9 @@ data class ShellConfig(
     
     @SerializedName("deepLinkHosts")
     val deepLinkHosts: List<String> = emptyList(),
+
+    @SerializedName("deepLinkSchemes")
+    val deepLinkSchemes: List<String> = emptyList(),
     
     // PHP 应用配置
     @SerializedName("phpAppConfig")

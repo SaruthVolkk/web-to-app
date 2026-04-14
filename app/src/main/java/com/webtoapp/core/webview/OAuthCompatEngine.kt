@@ -520,24 +520,24 @@ object OAuthCompatEngine {
 
     /**
      * 判断此 URL 是否应该主动重定向到 Chrome Custom Tab
-     * 仅 Google OAuth 需要 CCT（其他提供商的反检测仍然有效）
+     *
+     * Google OAuth is intentionally NOT redirected to Chrome Custom Tab.
+     * The WebView user agent no longer contains the `wv` marker (stripped
+     * by UserAgentResolver), so Google's disallowed_useragent check passes
+     * and the OAuth flow can complete entirely inside the WebView.
+     *
+     * Keeping Google OAuth in the WebView is required so that the web app's
+     * sessionStorage (set by markRedirectFlow() on the login page) is still
+     * accessible on the /auth/google/callback route — Chrome Custom Tab runs
+     * in a separate process and cannot share sessionStorage with the WebView.
      */
     fun shouldRedirectToCustomTab(url: String): Boolean {
-        val uri = runCatching { Uri.parse(url) }.getOrNull() ?: return false
-        val host = uri.host?.lowercase() ?: return false
-        val path = uri.path?.lowercase() ?: ""
-
-        if (host == "accounts.google.com") {
-            if (path.startsWith("/recaptcha") || path.startsWith("/gsi/")) return false
-            return true
-        }
-
-        if ((host.endsWith(".google.com") || host == "google.com") &&
-            (path.startsWith("/o/oauth2") || path.startsWith("/signin/oauth"))) {
-            return true
-        }
-
-        return false
+        // Detect if this is a Google OAuth URL
+        val provider = getProviderType(url)
+        
+        // Force Google OAuth to use Chrome Custom Tab to resolve 
+        // "this browser or app may not be secure" blocks.
+        return provider == Provider.GOOGLE
     }
 
     /**

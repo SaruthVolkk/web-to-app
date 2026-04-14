@@ -25,18 +25,19 @@ internal fun formatTimeMs(ms: Long): String {
 
 internal fun normalizeShellTargetUrlForSecurity(rawUrl: String): String {
     val trimmed = rawUrl.trim()
-    // 只为没有 scheme 的 URL 添加默认 scheme（https）
-    // 对于已有 http:// 的 URL，保持原样不强制升级
-    // 原因：很多内网/旧网站只支持 HTTP，强制升级会导致无法访问
-    val withScheme = if (!trimmed.startsWith("http://", ignoreCase = true) &&
-                          !trimmed.startsWith("https://", ignoreCase = true)) {
+    // 检查是否已经有协议头（如 :// 或常用的协议前缀）
+    val hasScheme = trimmed.contains("://") || 
+                   trimmed.startsWith("javascript:", ignoreCase = true) || 
+                   trimmed.startsWith("data:", ignoreCase = true) ||
+                   trimmed.startsWith("blob:", ignoreCase = true)
+    
+    return if (!hasScheme) {
         // 没有 scheme，添加 https 默认值
         "https://$trimmed"
     } else {
         // 已有 scheme，保持原样
         trimmed
     }
-    return withScheme
 }
 
 /**
@@ -46,45 +47,147 @@ internal fun normalizeShellTargetUrlForSecurity(rawUrl: String): String {
  * @param url 待验证的 URL
  * @param allowedHosts 允许的域名列表
  * @param targetUrl 配置的目标 URL（其域名始终允许）
+ * @param allowedSchemes 允许的自定义协议列表
  * @return 如果 URL 安全则返回 URL，否则返回 targetUrl
  */
-internal fun validateDeepLinkUrl(url: String, allowedHosts: List<String>, targetUrl: String): String {
-    if (allowedHosts.isEmpty()) return url  // 未配置白名单则放行
-    
-    val urlHost = try {
-        java.net.URL(url).host?.lowercase()
+internal fun validateDeepLinkUrl(
+    url: String, 
+    allowedHosts: List<String>, 
+    targetUrl: String,
+    allowedSchemes: List<String> = emptyList()
+): String {
+    val uri = try {
+        android.net.Uri.parse(url)
     } catch (e: Exception) {
         AppLogger.w("ShellActivity", "Invalid deep link URL: $url")
         return targetUrl
     }
     
-    if (urlHost.isNullOrBlank()) {
-        AppLogger.w("ShellActivity", "Deep link URL has no host: $url")
-        return targetUrl
+    val scheme = uri.scheme?.lowercase() ?: ""
+    if (scheme.isEmpty()) return targetUrl
+
+    // 1. 如果是网页协议 (http/https)，验证域名白名单
+    if (scheme == "http" || scheme == "https") {
+        if (allowedHosts.isEmpty()) return url  // 未配置白名单则放行
+        
+        val urlHost = uri.host?.lowercase() ?: ""
+        if (urlHost.isBlank()) {
+            AppLogger.w("ShellActivity", "Deep link URL has no host: $url")
+            return targetUrl
+        }
+        
+        // 提取配置 URL 的域名作为默认允许
+        val configHost = try {
+            android.net.Uri.parse(normalizeShellTargetUrlForSecurity(targetUrl)).host?.lowercase()
+        } catch (e: Exception) { null }
+        
+        val allAllowed = buildSet {
+            addAll(allowedHosts.map { it.lowercase() })
+            configHost?.let { add(it) }
+        }
+        
+        // 检查域名是否在白名单中（支持子域名匹配）
+        val isAllowed = allAllowed.any { allowedHost ->
+            urlHost == allowedHost || urlHost.endsWith(".$allowedHost")
+        }
+        
+        if (!isAllowed) {
+            AppLogger.w("ShellActivity", "Deep link URL host '$urlHost' not in allowed list, redirecting to target URL")
+            return targetUrl
+        }
+        return url
     }
     
-    // 提取配置 URL 的域名作为默认允许
-    val configHost = try {
-        java.net.URL(normalizeShellTargetUrlForSecurity(targetUrl)).host?.lowercase()
-    } catch (e: Exception) { null }
-    
-    val allAllowed = buildSet {
-        addAll(allowedHosts.map { it.lowercase() })
-        configHost?.let { add(it) }
+    // 2. 如果是自定义协议，验证协议白名单，然后提取真实 Web URL
+    if (allowedSchemes.isNotEmpty()) {
+        val normalizedSchemes = allowedSchemes.map {
+            it.lowercase().removeSuffix("://").removeSuffix(":")
+        }
+        if (normalizedSchemes.contains(scheme)) {
+            AppLogger.i("ShellActivity", "Allowed custom scheme deep link: $url")
+            return extractWebUrlFromCustomScheme(url, scheme, targetUrl)
+        }
     }
-    
-    // 检查域名是否在白名单中（支持子域名匹配）
-    val isAllowed = allAllowed.any { allowedHost ->
-        urlHost == allowedHost || urlHost.endsWith(".$allowedHost")
-    }
-    
-    if (!isAllowed) {
-        AppLogger.w("ShellActivity", "Deep link URL host '$urlHost' not in allowed list: $allAllowed, redirecting to target URL")
-        return targetUrl
-    }
-    
-    return url
+
+    AppLogger.w("ShellActivity", "Blocked URL with unauthorized scheme '$scheme': $url")
+    return targetUrl
 }
+
+/**
+ * Strips the custom scheme prefix and returns a loadable http/https URL.
+ *
+ * Handles two formats:
+ *   intent://https://host/path  → https://host/path   (embedded full URL)
+ *   intent://dashboard          → https://targetHost/dashboard  (path-only)
+ */
+/**
+ * Strips any custom deep link scheme and returns a loadable http/https URL.
+ *
+ * Works regardless of which scheme the user configured (myapp, etc.).
+ * Also fixes Chromium's URL mangling where "https://" becomes "https//" because
+ * Chromium treats "https:" as the URI authority and drops the colon.
+ *
+ * Examples:
+ *   myapp://https://host/path   → https://host/path
+ *   myapp://https//host/path    → https://host/path  (Chromium-mangled form)
+ *   myapp://dashboard           → https://targetHost/dashboard
+ *   https://host/path           → https://host/path  (already web URL, unchanged)
+ */
+internal fun stripDeepLinkScheme(url: String, targetUrl: String): String {
+    // Already a web URL — nothing to strip
+    if (url.startsWith("http://", ignoreCase = true) ||
+        url.startsWith("https://", ignoreCase = true)) {
+        return url
+    }
+
+    // Find the "://" separator that ends the custom scheme
+    val separatorIndex = url.indexOf("://")
+    if (separatorIndex < 0) return url  // no scheme at all, return as-is
+
+    // Everything after "scheme://"
+    val afterScheme = url.substring(separatorIndex + 3)
+
+    // Fix Chromium mangling: "https//" → "https://"  |  "http//" → "http://"
+    val webUrl = when {
+        afterScheme.startsWith("https://", ignoreCase = true) -> afterScheme
+        afterScheme.startsWith("http://", ignoreCase = true)  -> afterScheme
+        afterScheme.startsWith("https//", ignoreCase = true)  ->
+            "https://" + afterScheme.substring("https//".length)
+        afterScheme.startsWith("http//", ignoreCase = true)   ->
+            "http://" + afterScheme.substring("http//".length)
+        else -> null
+    }
+
+    if (webUrl != null) {
+        AppLogger.i("ShellActivity", "Deep link scheme stripped → $webUrl")
+        return webUrl
+    }
+
+    // Path-only form: myapp://dashboard → https://targetHost/dashboard
+    if (afterScheme.isNotBlank()) {
+        val targetOrigin = try {
+            val u = android.net.Uri.parse(targetUrl)
+            if (u.scheme != null && u.host != null) "${u.scheme}://${u.host}" else null
+        } catch (e: Exception) { null }
+
+        if (targetOrigin != null) {
+            val path = if (afterScheme.startsWith("/")) afterScheme else "/$afterScheme"
+            val resolved = "$targetOrigin$path"
+            AppLogger.i("ShellActivity", "Deep link path-only → $resolved")
+            return resolved
+        }
+    }
+
+    AppLogger.w("ShellActivity", "Could not resolve deep link '$url', falling back to targetUrl")
+    return targetUrl
+}
+
+// Keep old names as thin wrappers so existing call-sites still compile
+internal fun extractWebUrlFromCustomScheme(url: String, scheme: String, targetUrl: String): String =
+    stripDeepLinkScheme(url, targetUrl)
+
+internal fun resolveDeepLinkToWebUrl(url: String, knownSchemes: List<String>, targetUrl: String): String =
+    stripDeepLinkScheme(url, targetUrl)
 
 internal fun normalizeExternalUrlForIntent(rawUrl: String): String {
     val safeUrl = normalizeExternalIntentUrl(rawUrl)

@@ -25641,6 +25641,18 @@ object Strings {
         AppLanguage.ENGLISH -> "Main domain and www subdomain are auto-matched. Add extra domains here (one per line)"
         AppLanguage.ARABIC -> "يتم مطابقة النطاق الرئيسي والنطاق الفرعي www تلقائيًا. أضف نطاقات إضافية هنا (واحد لكل سطر)"
     }
+
+    val deepLinkCustomSchemesLabel: String get() = when (lang) {
+        AppLanguage.CHINESE -> "自定义协议 (myapp://)"
+        AppLanguage.ENGLISH -> "Custom Schemes (myapp://)"
+        AppLanguage.ARABIC -> "بروتوكولات مخصصة (myapp://)"
+    }
+    
+    val deepLinkCustomSchemesHint: String get() = when (lang) {
+        AppLanguage.CHINESE -> "在此处添加自定义协议，用于从外部启动应用（每行一个，不带 ://）"
+        AppLanguage.ENGLISH -> "Add custom schemes to launch your app (without ://)"
+        AppLanguage.ARABIC -> "أضف بروتوكولات مخصصة لتشغيل تطبيقك (واحد لكل سطر، بدون ://)"
+    }
     
     // ============ Encryption Level ============
     val encryptLevelFast: String get() = when (lang) {

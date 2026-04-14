@@ -442,7 +442,13 @@ class MainViewModel(
                 val apkExportConfig = state.apkExportConfig.let { config ->
                     if (config.customPackageName.isNullOrBlank() && 
                         config.customVersionName.isNullOrBlank() && 
-                        config.customVersionCode == null) {
+                        config.customVersionCode == null &&
+                        !config.deepLinkEnabled &&
+                        config.customDeepLinkHosts.isEmpty() &&
+                        config.customDeepLinkSchemes.isEmpty() &&
+                        !config.backgroundRunEnabled &&
+                        config.engineType == "SYSTEM_WEBVIEW" &&
+                        !config.performanceOptimization) {
                         null
                     } else {
                         config
@@ -623,7 +629,13 @@ class MainViewModel(
             val apkExportConfig = state.apkExportConfig.let { config ->
                 if (config.customPackageName.isNullOrBlank() && 
                     config.customVersionName.isNullOrBlank() && 
-                    config.customVersionCode == null) null else config
+                    config.customVersionCode == null &&
+                    !config.deepLinkEnabled &&
+                    config.customDeepLinkHosts.isEmpty() &&
+                    config.customDeepLinkSchemes.isEmpty() &&
+                    !config.backgroundRunEnabled &&
+                    config.engineType == "SYSTEM_WEBVIEW" &&
+                    !config.performanceOptimization) null else config
             }
             
             val translateConfig = if (state.translateEnabled) state.translateConfig else null

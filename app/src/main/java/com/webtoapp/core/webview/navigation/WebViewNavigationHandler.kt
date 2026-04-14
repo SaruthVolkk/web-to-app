@@ -15,7 +15,9 @@ import com.webtoapp.data.model.WebViewConfig
 
 internal class WebViewNavigationHandler(
     private val context: Context,
-    private val urlPolicy: WebViewUrlPolicy
+    private val urlPolicy: WebViewUrlPolicy,
+    private val getCurrentMainFrameUrl: () -> String? = { null },
+    private val getAppDeepLinkSchemes: () -> Set<String> = { emptySet() }
 ) {
     fun applyPreloadPolicyForUrl(
         webView: WebView,
@@ -132,8 +134,32 @@ internal class WebViewNavigationHandler(
                         null
                     }
                 }
-                else -> Intent(Intent.ACTION_VIEW, uri).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                else -> {
+                    if (scheme in getAppDeepLinkSchemes()) {
+                        val inAppUrl = extractEmbeddedHttpUrl(uri, url)
+                            ?: run {
+                                val base = getCurrentMainFrameUrl()?.let { b ->
+                                    val u = Uri.parse(b)
+                                    if (u.scheme != null && u.host != null) "${u.scheme}://${u.host}" else null
+                                }
+                                if (base != null) {
+                                    val authority = uri.authority?.takeIf { it.isNotBlank() }
+                                    val path = uri.path?.let { if (it.startsWith("/")) it else "/$it" } ?: ""
+                                    val query = uri.query?.let { "?$it" } ?: ""
+                                    if (authority != null) urlPolicy.normalizeHttpUrlForSecurity("$base/$authority$path$query") else null
+                                } else null
+                            }
+                        if (!inAppUrl.isNullOrEmpty()) {
+                            AppLogger.i("WebViewManager", "Own deep link scheme '$scheme', loading in-app: $inAppUrl")
+                            managedWebViews.firstOrNull()?.loadUrl(inAppUrl)
+                        } else {
+                            AppLogger.w("WebViewManager", "Own deep link scheme '$scheme' but could not resolve in-app URL: $url")
+                        }
+                        return true
+                    }
+                    Intent(Intent.ACTION_VIEW, uri).apply {
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
                 }
             }
 
@@ -160,19 +186,35 @@ internal class WebViewNavigationHandler(
                     context.startActivity(intent)
                     return true
                 } catch (e: android.content.ActivityNotFoundException) {
-                    AppLogger.w("WebViewManager", "No activity found for intent", e)
+                    AppLogger.w("WebViewManager", "No activity found for intent: scheme=$scheme url=$url", e)
                     if (!fallbackUrl.isNullOrEmpty()) {
                         AppLogger.d("WebViewManager", "Using fallback URL: $fallbackUrl")
                         managedWebViews.firstOrNull()?.loadUrl(fallbackUrl)
                         return true
                     }
+                    val inAppUrl = when (scheme) {
+                        "intent" -> resolveIntentUrlToInAppUrl(url)
+                        else -> extractEmbeddedHttpUrl(uri, url) ?: resolveIntentUrlToInAppUrl(url)
+                    }
+                    if (!inAppUrl.isNullOrEmpty()) {
+                        AppLogger.i("WebViewManager", "No handler for $scheme://, loading in-app: $inAppUrl")
+                        managedWebViews.firstOrNull()?.loadUrl(inAppUrl)
+                    }
                     return true
                 } catch (e: SecurityException) {
-                    AppLogger.e("WebViewManager", "Security exception launching intent", e)
+                    AppLogger.e("WebViewManager", "Security exception launching intent: scheme=$scheme", e)
                     if (!fallbackUrl.isNullOrEmpty()) {
                         AppLogger.d("WebViewManager", "Using fallback URL after security error: $fallbackUrl")
                         managedWebViews.firstOrNull()?.loadUrl(fallbackUrl)
                         return true
+                    }
+                    val inAppUrl = when (scheme) {
+                        "intent" -> resolveIntentUrlToInAppUrl(url)
+                        else -> extractEmbeddedHttpUrl(uri, url) ?: resolveIntentUrlToInAppUrl(url)
+                    }
+                    if (!inAppUrl.isNullOrEmpty()) {
+                        AppLogger.i("WebViewManager", "Security error for $scheme://, loading in-app: $inAppUrl")
+                        managedWebViews.firstOrNull()?.loadUrl(inAppUrl)
                     }
                     return true
                 }
@@ -271,5 +313,68 @@ internal class WebViewNavigationHandler(
             return null
         }
         return urlPolicy.normalizeHttpUrlForSecurity(trimmed)
+    }
+
+    /**
+     * Strips a custom-scheme prefix when it wraps a full http/https URL.
+     */
+    private fun extractEmbeddedHttpUrl(uri: Uri, rawUrl: String = uri.toString()): String? {
+        val schemePrefix = "${uri.scheme}://"
+        if (!rawUrl.startsWith(schemePrefix, ignoreCase = true)) return null
+        val afterPrefix = rawUrl.removePrefix(schemePrefix)
+
+        // Chromium drops the colon from "https:" → "https//". Restore it.
+        val embedded = when {
+            afterPrefix.startsWith("https//", ignoreCase = true) ->
+                "https://" + afterPrefix.removePrefix("https//")
+            afterPrefix.startsWith("http//", ignoreCase = true) ->
+                "http://" + afterPrefix.removePrefix("http//")
+            afterPrefix.startsWith("https://", ignoreCase = true) -> afterPrefix
+            afterPrefix.startsWith("http://", ignoreCase = true) -> afterPrefix
+            else -> return null
+        }
+        return urlPolicy.normalizeHttpUrlForSecurity(embedded)
+    }
+
+    /**
+     * Converts an unhandled `intent://` URI into an equivalent in-app HTTPS URL by
+     * rebasing the intent's path/query onto the app's current host.
+     *
+     * Handles two common formats:
+     *  1. intent://host/path#Intent;scheme=https;...;end  → https://host/path
+     *  2. intent://path-only#Intent;...;end              → https://<currentHost>/path-only
+     *
+     * Returns null if the resulting URL cannot be safely constructed.
+     */
+    private fun resolveIntentUrlToInAppUrl(intentUrl: String): String? {
+        return try {
+            val parsed = Intent.parseUri(intentUrl, Intent.URI_INTENT_SCHEME)
+            val data = parsed.data
+
+            // Prefer the intent's own data URI when it resolves to a real http/https URL
+            if (data != null) {
+                val dataScheme = data.scheme?.lowercase()
+                if (dataScheme == "http" || dataScheme == "https") {
+                    return urlPolicy.normalizeHttpUrlForSecurity(data.toString())
+                }
+            }
+
+            // Fall back: extract path from the raw intent:// authority+path, graft onto current host
+            val currentBase = getCurrentMainFrameUrl()?.let { base ->
+                val u = Uri.parse(base)
+                if (u.scheme != null && u.host != null) "https://${u.host}" else null
+            } ?: return null
+
+            val rawUri = Uri.parse(intentUrl)
+            val authority = rawUri.authority?.takeIf { it.isNotBlank() } ?: return null
+            val path = rawUri.path?.let { if (it.startsWith("/")) it else "/$it" } ?: ""
+            val query = rawUri.query?.let { "?$it" } ?: ""
+
+            val candidate = "$currentBase/$authority$path$query"
+            urlPolicy.normalizeHttpUrlForSecurity(candidate)
+        } catch (e: Exception) {
+            AppLogger.w("WebViewManager", "Could not resolve intent:// to in-app URL: $intentUrl", e)
+            null
+        }
     }
 }

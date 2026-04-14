@@ -629,7 +629,11 @@ class WebViewManager(
     private val urlPolicy = WebViewUrlPolicy()
     private val userAgentResolver = UserAgentResolver(context)
     private val settingsConfigurator = WebViewSettingsConfigurator()
-    private val navigationHandler = WebViewNavigationHandler(context, urlPolicy)
+    private val navigationHandler = WebViewNavigationHandler(
+        context, urlPolicy,
+        getCurrentMainFrameUrl = { currentMainFrameUrl },
+        getAppDeepLinkSchemes = { appDeepLinkSchemes }
+    )
     private val requestInterceptionCoordinator = RequestInterceptionCoordinator(
         context = context,
         adBlocker = adBlocker,
@@ -715,12 +719,19 @@ class WebViewManager(
         extensionFabIcon: String = "",
         allowGlobalModuleFallback: Boolean = false,
         browserDisguiseConfig: com.webtoapp.core.disguise.BrowserDisguiseConfig? = null,
-        deviceDisguiseConfig: com.webtoapp.core.disguise.DeviceDisguiseConfig? = null
+        deviceDisguiseConfig: com.webtoapp.core.disguise.DeviceDisguiseConfig? = null,
+        appBaseUrl: String? = null,
+        appDeepLinkSchemes: List<String> = emptyList()
     ) {
         // Initialize dynamic User-Agent strings from system WebView
         ensureDynamicUserAgents()
         // Save config reference
         this.currentConfig = config
+        if (appBaseUrl != null) this.appBaseUrl = appBaseUrl
+        this.appDeepLinkSchemes = appDeepLinkSchemes
+            .map { it.lowercase().removeSuffix("://").removeSuffix(":").trim() }
+            .filter { it.isNotBlank() }
+            .toSet()
         // Pre-generate Browser Disguise JS (cached for all page loads)
         this.cachedBrowserDisguiseConfig = browserDisguiseConfig
         this.cachedBrowserDisguiseJs = if (browserDisguiseConfig?.enabled == true) {
@@ -849,11 +860,12 @@ class WebViewManager(
      * @return Effective User-Agent string, or null if using system default
      */
     private fun resolveUserAgent(config: WebViewConfig): String? {
-        return userAgentResolver.resolveUserAgent(
+        val ua = userAgentResolver.resolveUserAgent(
             config = config,
             deviceDisguiseConfig = currentDeviceDisguiseConfig,
             desktopUserAgent = DESKTOP_USER_AGENT ?: DESKTOP_USER_AGENT_FALLBACK
         )
+        return if (ua != null) "$ua WebToApp/1.0" else null
     }
 
     /**
@@ -2167,7 +2179,20 @@ class WebViewManager(
                     }
                 }
                 else -> {
-                    // Other protocols (tel:, mailto:, sms:, etc.) use ACTION_VIEW
+                    // If this scheme is one the app itself registered as a deep link,
+                    // resolve it in-app immediately — no startActivity to avoid re-entering
+                    // shouldOverrideUrlLoading with the same URI (infinite loop).
+                    if (scheme in appDeepLinkSchemes) {
+                        val inAppUrl = resolveCustomSchemeToInAppUrl(uri, url)
+                        if (!inAppUrl.isNullOrEmpty()) {
+                            AppLogger.i("WebViewManager", "Own deep link scheme '$scheme', loading in-app: $inAppUrl")
+                            managedWebViews.keys.firstOrNull()?.loadUrl(inAppUrl)
+                        } else {
+                            AppLogger.w("WebViewManager", "Own deep link scheme '$scheme' but could not resolve in-app URL: $url")
+                        }
+                        return true
+                    }
+                    // Third-party schemes (tel:, mailto:, sms:, market:, etc.) — open system handler
                     android.content.Intent(android.content.Intent.ACTION_VIEW, uri).apply {
                         addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
@@ -2203,23 +2228,36 @@ class WebViewManager(
                     return true
                     
                 } catch (e: android.content.ActivityNotFoundException) {
-                    AppLogger.w("WebViewManager", "No activity found for intent", e)
-                    // Use fallback URL if available
+                    AppLogger.w("WebViewManager", "No activity found for intent: scheme=$scheme url=$url", e)
                     if (!fallbackUrl.isNullOrEmpty()) {
                         AppLogger.d("WebViewManager", "Using fallback URL: $fallbackUrl")
-                        // Load fallback URL in WebView
                         managedWebViews.keys.firstOrNull()?.loadUrl(fallbackUrl)
                         return true
                     }
-                    // No fallback, return true to prevent ERR_UNKNOWN_URL_SCHEME
+                    // No installed handler — rebase the path onto the app's configured base URL
+                    val inAppUrl = when (scheme) {
+                        "intent" -> resolveIntentUrlToInAppUrl(url)
+                        else -> resolveCustomSchemeToInAppUrl(uri, url)
+                    }
+                    if (!inAppUrl.isNullOrEmpty()) {
+                        AppLogger.i("WebViewManager", "No handler for $scheme://, loading in-app: $inAppUrl")
+                        managedWebViews.keys.firstOrNull()?.loadUrl(inAppUrl)
+                    }
                     return true
                 } catch (e: SecurityException) {
-                    AppLogger.e("WebViewManager", "Security exception launching intent", e)
-                    // Use fallback URL if available
+                    AppLogger.e("WebViewManager", "Security exception launching intent: scheme=$scheme", e)
                     if (!fallbackUrl.isNullOrEmpty()) {
                         AppLogger.d("WebViewManager", "Using fallback URL after security error: $fallbackUrl")
                         managedWebViews.keys.firstOrNull()?.loadUrl(fallbackUrl)
                         return true
+                    }
+                    val inAppUrl = when (scheme) {
+                        "intent" -> resolveIntentUrlToInAppUrl(url)
+                        else -> resolveCustomSchemeToInAppUrl(uri, url)
+                    }
+                    if (!inAppUrl.isNullOrEmpty()) {
+                        AppLogger.i("WebViewManager", "Security error for $scheme://, loading in-app: $inAppUrl")
+                        managedWebViews.keys.firstOrNull()?.loadUrl(inAppUrl)
                     }
                     return true
                 }
@@ -2241,6 +2279,79 @@ class WebViewManager(
             return null
         }
         return normalizeHttpUrlForSecurity(trimmed)
+    }
+
+    /**
+     * Converts a custom-scheme or unhandled `intent://` URI into the equivalent in-app
+     * HTTPS URL by rebasing the URI's path onto the app's configured base URL.
+     */
+    private fun resolveIntentUrlToInAppUrl(intentUrl: String): String? {
+        return try {
+            val parsed = android.content.Intent.parseUri(intentUrl, android.content.Intent.URI_INTENT_SCHEME)
+            val data = parsed.data
+            // If the intent carries a fully qualified http/https URL, use it directly
+            if (data != null) {
+                val dataScheme = data.scheme?.lowercase()
+                if (dataScheme == "http" || dataScheme == "https") {
+                    return normalizeHttpUrlForSecurity(data.toString())
+                }
+            }
+            // Otherwise rebase the intent's authority+path onto the app base URL
+            val rawUri = Uri.parse(intentUrl)
+            resolvePathOntoBaseUrl(rawUri)
+        } catch (e: Exception) {
+            AppLogger.w("WebViewManager", "Could not resolve intent:// to in-app URL: $intentUrl", e)
+            null
+        }
+    }
+
+    /**
+     * Converts a custom-scheme URI into an in-app HTTPS URL.
+     */
+    private fun resolveCustomSchemeToInAppUrl(uri: Uri, url: String = uri.toString()): String? {
+        return try {
+            val schemePrefix = "${uri.scheme}://"
+            val afterPrefix = url.removePrefix(schemePrefix)
+
+            val restored = when {
+                afterPrefix.startsWith("https//", ignoreCase = true) ->
+                    "https://" + afterPrefix.removePrefix("https//")
+                afterPrefix.startsWith("http//", ignoreCase = true) ->
+                    "http://" + afterPrefix.removePrefix("http//")
+                else -> afterPrefix
+            }
+
+            // Format 1: embedded full http/https URL
+            if (restored.startsWith("https://", ignoreCase = true) || restored.startsWith("http://", ignoreCase = true)) {
+                AppLogger.d("WebViewManager", "Custom scheme contains embedded URL, loading directly: $restored")
+                return normalizeHttpUrlForSecurity(restored)
+            }
+
+            // Format 2: path-only — rebase onto app base URL
+            resolvePathOntoBaseUrl(uri)
+        } catch (e: Exception) {
+            AppLogger.w("WebViewManager", "Could not resolve custom scheme to in-app URL: $uri", e)
+            null
+        }
+    }
+
+    /**
+     * Core rebase logic: takes the authority + path + query from [uri] and appends them
+     * to [appBaseUrl] (falling back to [currentMainFrameUrl] origin if not set).
+     */
+    private fun resolvePathOntoBaseUrl(uri: Uri): String? {
+        val base = (appBaseUrl ?: currentMainFrameUrl)?.let { raw ->
+            val u = Uri.parse(raw)
+            if (u.scheme != null && u.host != null) "${u.scheme}://${u.host}" else null
+        } ?: return null
+
+        // authority = first path segment in the custom scheme (e.g. "dashboard")
+        val authority = uri.authority?.takeIf { it.isNotBlank() } ?: return null
+        val path = uri.path?.let { if (it.startsWith("/")) it else "/$it" } ?: ""
+        val query = uri.query?.let { "?$it" } ?: ""
+
+        val candidate = "$base/$authority$path$query"
+        return normalizeHttpUrlForSecurity(candidate)
     }
 
     /**
@@ -2318,6 +2429,8 @@ class WebViewManager(
     
     // Save config reference (for script injection)
     private var currentConfig: WebViewConfig? = null
+    private var appBaseUrl: String? = null
+    private var appDeepLinkSchemes: Set<String> = emptySet()
     
     // Browser Disguise — pre-generated anti-fingerprint JS (cached per configureWebView call)
     private var cachedBrowserDisguiseJs: String? = null

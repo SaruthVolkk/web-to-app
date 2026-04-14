@@ -22,10 +22,13 @@ android {
 
     signingConfigs {
         create("shiaho") {
-            storeFile = file(localProperties.getProperty("signing.storeFile", ""))
-            storePassword = localProperties.getProperty("signing.storePassword", "")
-            keyAlias = localProperties.getProperty("signing.keyAlias", "")
-            keyPassword = localProperties.getProperty("signing.keyPassword", "")
+            val storeFilePath = localProperties.getProperty("signing.storeFile")
+            if (!storeFilePath.isNullOrEmpty()) {
+                storeFile = file(storeFilePath)
+                storePassword = localProperties.getProperty("signing.storePassword", "")
+                keyAlias = localProperties.getProperty("signing.keyAlias", "")
+                keyPassword = localProperties.getProperty("signing.keyPassword", "")
+            }
         }
     }
     namespace = "com.webtoapp"
@@ -41,7 +44,7 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
-        
+
         // NDK 配置
         ndk {
             abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")

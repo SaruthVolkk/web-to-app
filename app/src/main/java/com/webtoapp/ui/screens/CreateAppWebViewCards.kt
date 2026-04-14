@@ -836,6 +836,39 @@ fun WebViewConfigCard(
                                     maxLines = 4,
                                     textStyle = MaterialTheme.typography.bodySmall
                                 )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                Text(
+                                    text = Strings.deepLinkCustomSchemesLabel,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(bottom = 4.dp)
+                                )
+                                Text(
+                                    text = Strings.deepLinkCustomSchemesHint,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(bottom = 4.dp)
+                                )
+                                var customSchemesText by remember(apkExportConfig.customDeepLinkSchemes) {
+                                    mutableStateOf(apkExportConfig.customDeepLinkSchemes.joinToString("\n"))
+                                }
+                                PremiumTextField(
+                                    value = customSchemesText,
+                                    onValueChange = { newText ->
+                                        customSchemesText = newText
+                                        val schemes = newText.split("\n", ",", " ")
+                                            .map { it.trim().replace("://", "") }
+                                            .filter { it.isNotBlank() }
+                                        onApkExportConfigChange(apkExportConfig.copy(customDeepLinkSchemes = schemes))
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    placeholder = { Text("myapp") },
+                                    minLines = 2,
+                                    maxLines = 4,
+                                    textStyle = MaterialTheme.typography.bodySmall
+                                )
                             }
                         }
 
