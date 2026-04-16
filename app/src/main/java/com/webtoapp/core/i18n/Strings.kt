@@ -25653,6 +25653,48 @@ object Strings {
         AppLanguage.ENGLISH -> "Add custom schemes to launch your app (without ://)"
         AppLanguage.ARABIC -> "أضف بروتوكولات مخصصة لتشغيل تطبيقك (واحد لكل سطر، بدون ://)"
     }
+
+    val appLinksSetupTitle: String get() = when (lang) {
+        AppLanguage.CHINESE -> "App Links 配置"
+        AppLanguage.ENGLISH -> "App Links Setup"
+        AppLanguage.ARABIC -> "إعداد App Links"
+    }
+
+    val appLinksSetupDesc: String get() = when (lang) {
+        AppLanguage.CHINESE -> "⚠️ 请先完成以下步骤，再分享 APK。\n\n将下方文件上传至（路径必须完全一致，无跳转）：\nhttps://yourdomain.com/.well-known/assetlinks.json\n\n• 文件必须通过 HTTPS 访问\n• Content-Type 须为 application/json\n• 不能有 301/302 跳转\n\n完成后重新安装 APK，Android 会在安装时自动验证，无需用户手动操作。"
+        AppLanguage.ENGLISH -> "⚠️ Do this BEFORE (re)installing the APK.\n\nHost the file below at (exact path, no redirects):\nhttps://yourdomain.com/.well-known/assetlinks.json\n\n• Must be served over HTTPS\n• Content-Type must be application/json\n• Must not redirect (no 301/302)\n\nThen reinstall the APK — Android verifies at install time automatically, just like Facebook."
+        AppLanguage.ARABIC -> "⚠️ افعل هذا قبل (إعادة) تثبيت APK.\n\nضع الملف على موقعك (المسار مطابق تماماً، بدون إعادة توجيه):\nhttps://yourdomain.com/.well-known/assetlinks.json\n\n• يجب تقديمه عبر HTTPS\n• يجب أن يكون Content-Type هو application/json\n• يجب ألا يكون هناك إعادة توجيه\n\nثم أعد تثبيت APK — سيتحقق Android تلقائياً عند التثبيت."
+    }
+
+    val appLinksCopied: String get() = when (lang) {
+        AppLanguage.CHINESE -> "已复制到剪贴板"
+        AppLanguage.ENGLISH -> "Copied to clipboard"
+        AppLanguage.ARABIC -> "تم النسخ إلى الحافظة"
+    }
+
+    val appLinksCopyButton: String get() = when (lang) {
+        AppLanguage.CHINESE -> "复制 assetlinks.json"
+        AppLanguage.ENGLISH -> "Copy assetlinks.json"
+        AppLanguage.ARABIC -> "نسخ assetlinks.json"
+    }
+
+    val appLinksBannerDesc: String get() = when (lang) {
+        AppLanguage.CHINESE -> "点击下方按钮，在设置中手动启用「支持的网址」，即可让浏览器链接直接在此应用中打开。"
+        AppLanguage.ENGLISH -> "Tap below to manually enable \"Supported web addresses\" in Settings so browser links open directly in this app."
+        AppLanguage.ARABIC -> "اضغط أدناه لتفعيل \"عناوين الويب المدعومة\" في الإعدادات يدوياً حتى تفتح روابط المتصفح مباشرةً في هذا التطبيق."
+    }
+
+    val appLinksBannerButton: String get() = when (lang) {
+        AppLanguage.CHINESE -> "前往设置 → 支持的网址"
+        AppLanguage.ENGLISH -> "Open Settings → Supported web addresses"
+        AppLanguage.ARABIC -> "فتح الإعدادات ← عناوين الويب المدعومة"
+    }
+
+    val appLinksFingerprintLabel: String get() = when (lang) {
+        AppLanguage.CHINESE -> "此 APK 的签名指纹（须与 assetlinks.json 一致）："
+        AppLanguage.ENGLISH -> "This APK's signing fingerprint (must match assetlinks.json):"
+        AppLanguage.ARABIC -> "بصمة توقيع هذا التطبيق (يجب أن تطابق assetlinks.json):"
+    }
     
     // ============ Encryption Level ============
     val encryptLevelFast: String get() = when (lang) {

@@ -485,6 +485,21 @@ class ApkBuilder(private val context: Context) {
             if (!parseResult) {
                 logger.warn("APK pre-parse failed, may not be installable")
             }
+
+            // Verify autoVerify attribute was written with correct resource ID (0x0101464c)
+            val autoVerifyOk = verifyAutoVerifyAttribute(signedApk)
+            logger.logKeyValue("appLinks_autoVerify_written", autoVerifyOk)
+            if (!autoVerifyOk && (config.deepLinkEnabled)) {
+                logger.warn("autoVerify attribute not found in manifest — App Links may not work automatically at install time")
+            }
+
+            // Dump manifest intent-filters for diagnostic purposes
+            if (config.deepLinkEnabled) {
+                val manifestDump = dumpManifestIntentFilters(signedApk)
+                logger.log("--- Manifest Intent-Filter Dump ---")
+                manifestDump.lines().forEach { logger.log(it) }
+                logger.log("--- End Manifest Dump ---")
+            }
             
             onProgress(90, "Analyzing & cleaning up...")
             
@@ -516,7 +531,7 @@ class ApkBuilder(private val context: Context) {
             logger.logKeyValue("finalApkSize", "${signedApk.length() / 1024} KB")
             logger.endLog(true, "Build successful")
             
-            BuildResult.Success(signedApk, logger.getCurrentLogPath(), analysisReport)
+            BuildResult.Success(signedApk, logger.getCurrentLogPath(), analysisReport, signer.getCertFingerprintHex(), packageName, autoVerifyOk)
             
         } catch (e: Exception) {
             logger.error("Exception during build", e)
@@ -1879,6 +1894,174 @@ builtins.__import__ = _w2a_import
     }
     
     /**
+     * Scan the built APK's AndroidManifest.xml for the autoVerify attribute resource ID (0x0101464c).
+     * Returns true if found, meaning App Links verification will be triggered at install time.
+     */
+    private fun verifyAutoVerifyAttribute(apkFile: File): Boolean {
+        return try {
+            java.util.zip.ZipFile(apkFile).use { zip ->
+                val entry = zip.getEntry("AndroidManifest.xml") ?: return false
+                val bytes = zip.getInputStream(entry).readBytes()
+                // Scan raw bytes for the autoVerify resource ID 0x0101464c in little-endian
+                // byte sequence: 4C 46 01 01
+                val target = byteArrayOf(0x4C, 0x46.toByte(), 0x01, 0x01)
+                for (i in 0..bytes.size - 4) {
+                    if (bytes[i] == target[0] && bytes[i+1] == target[1] &&
+                        bytes[i+2] == target[2] && bytes[i+3] == target[3]) {
+                        return true
+                    }
+                }
+                false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Decode and log the intent-filter sections from the APK's binary AndroidManifest.xml.
+     * This produces a human-readable dump of every <intent-filter> block so we can verify
+     * that autoVerify="true", the correct hosts, and the correct schemes were written.
+     */
+    private fun dumpManifestIntentFilters(apkFile: File): String {
+        return try {
+            val bytes = java.util.zip.ZipFile(apkFile).use { zip ->
+                zip.getEntry("AndroidManifest.xml")?.let { zip.getInputStream(it).readBytes() }
+            } ?: return "ERROR: AndroidManifest.xml not found in APK"
+
+            // Parse all chunks
+            val strings = mutableListOf<String>()
+            val resourceMap = mutableListOf<Int>()
+            var inIntentFilter = false
+            var intentFilterAutoVerify = false
+            var intentFilterLines = mutableListOf<String>()
+            val intentFilters = mutableListOf<String>()
+
+            val fullBuf = java.nio.ByteBuffer.wrap(bytes).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            fullBuf.getShort(); fullBuf.getShort(); fullBuf.getInt() // AXML file header
+
+            while (fullBuf.remaining() >= 8) {
+                val chunkStart = fullBuf.position()
+                val chunkType = fullBuf.getShort().toInt() and 0xFFFF
+                fullBuf.getShort() // headerSize (unused)
+                val chunkSize = fullBuf.getInt()
+                if (chunkSize <= 0 || chunkSize > fullBuf.capacity()) break
+
+                when (chunkType) {
+                    0x0001 -> { // STRING_POOL
+                        val strCount = fullBuf.getInt()
+                        fullBuf.getInt() // styleCount (unused)
+                        val flags = fullBuf.getInt()
+                        val strStart = fullBuf.getInt()
+                        fullBuf.getInt() // styleStart (unused)
+                        val offsets = IntArray(strCount) { fullBuf.getInt() }
+                        val dataBase = chunkStart + strStart
+                        val isUtf8 = (flags and 0x100) != 0
+                        for (i in 0 until strCount) {
+                            try {
+                                val pos = dataBase + offsets[i]
+                                if (pos < 0 || pos >= bytes.size) { strings.add(""); continue }
+                                val strBuf = java.nio.ByteBuffer.wrap(bytes, pos, bytes.size - pos).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+                                val str = if (isUtf8) {
+                                    strBuf.get(); strBuf.get() // skip utf16len, utf8len
+                                    val start = pos + 2
+                                    var end = start
+                                    while (end < bytes.size && bytes[end] != 0.toByte()) end++
+                                    String(bytes, start, end - start, Charsets.UTF_8)
+                                } else {
+                                    val len = strBuf.getShort().toInt() and 0xFFFF
+                                    val chars = CharArray(len) { strBuf.getChar() }
+                                    String(chars)
+                                }
+                                strings.add(str)
+                            } catch (_: Exception) { strings.add("") }
+                        }
+                        fullBuf.position(chunkStart + chunkSize)
+                    }
+                    0x0180 -> { // RESOURCE_MAP
+                        val count = (chunkSize - 8) / 4
+                        repeat(count) { resourceMap.add(fullBuf.getInt()) }
+                        fullBuf.position(chunkStart + chunkSize)
+                    }
+                    0x0102 -> { // START_ELEMENT
+                        fullBuf.getInt(); fullBuf.getInt() // lineNumber, comment
+                        fullBuf.getInt() // namespaceIdx (unused)
+                        val nameIdx = fullBuf.getInt()
+                        fullBuf.getShort() // attrStart (unused)
+                        fullBuf.getShort() // attrSize (unused)
+                        val attrCount = fullBuf.getShort().toInt() and 0xFFFF
+                        fullBuf.getShort(); fullBuf.getShort(); fullBuf.getShort() // idIdx, classIdx, styleIdx
+
+                        val name = strings.getOrNull(nameIdx) ?: "?$nameIdx"
+
+                        val attrs = mutableListOf<Pair<Int, Any?>>() // resId -> value
+                        repeat(attrCount) {
+                            fullBuf.getInt() // attrNsIdx (namespace, unused in dump)
+                            val attrNameIdx = fullBuf.getInt()
+                            fullBuf.getInt() // rawValue (unused in dump)
+                            fullBuf.getShort() // valueSize (unused)
+                            fullBuf.get() // res0 (unused)
+                            val dataType = fullBuf.get().toInt() and 0xFF
+                            val value = fullBuf.getInt()
+                            val resId = resourceMap.getOrNull(attrNameIdx) ?: 0
+                            val resolved: Any? = when (dataType) {
+                                0x03 -> strings.getOrNull(value) // TYPE_STRING
+                                0x10, 0x11 -> value // TYPE_INT_DEC, TYPE_INT_HEX
+                                0x12 -> value != 0 // TYPE_INT_BOOLEAN
+                                else -> "@0x${value.toString(16)}"
+                            }
+                            attrs.add(Pair(resId, resolved))
+                        }
+
+                        if (name == "intent-filter") {
+                            inIntentFilter = true
+                            intentFilterAutoVerify = attrs.any { it.first == 0x0101464c && it.second == true }
+                            intentFilterLines = mutableListOf("<intent-filter autoVerify=$intentFilterAutoVerify>")
+                        } else if (inIntentFilter) {
+                            val attrStr = attrs.joinToString(" ") { (resId, v) ->
+                                val attrName = when (resId) {
+                                    0x01010003 -> "name"
+                                    0x01010027 -> "scheme"
+                                    0x01010028 -> "host"
+                                    0x0101464c -> "autoVerify"
+                                    else -> "0x${resId.toString(16)}"
+                                }
+                                "$attrName=$v"
+                            }
+                            intentFilterLines.add("  <$name $attrStr>")
+                        }
+                        fullBuf.position(chunkStart + chunkSize)
+                    }
+                    0x0103 -> { // END_ELEMENT
+                        fullBuf.getInt(); fullBuf.getInt() // lineNumber, comment
+                        fullBuf.getInt() // namespaceIdx (unused)
+                        val nameIdx = fullBuf.getInt()
+                        val name = strings.getOrNull(nameIdx) ?: "?"
+                        if (name == "intent-filter" && inIntentFilter) {
+                            intentFilterLines.add("</intent-filter>")
+                            intentFilters.add(intentFilterLines.joinToString("\n"))
+                            inIntentFilter = false
+                            intentFilterLines = mutableListOf()
+                        }
+                        fullBuf.position(chunkStart + chunkSize)
+                    }
+                    else -> fullBuf.position(chunkStart + chunkSize)
+                }
+                if (fullBuf.position() >= fullBuf.capacity()) break
+            }
+
+            if (intentFilters.isEmpty()) {
+                "NO intent-filters found in manifest"
+            } else {
+                "=== Manifest Intent Filters (${intentFilters.size}) ===\n" +
+                intentFilters.joinToString("\n---\n")
+            }
+        } catch (e: Exception) {
+            "ERROR decoding manifest: ${e.message}"
+        }
+    }
+
+    /**
      * Write entry (using DEFLATED compression format)
      */
     private fun writeEntryDeflated(zipOut: ZipOutputStream, name: String, data: ByteArray) {
@@ -2381,15 +2564,21 @@ private fun extractHostsFromUrl(url: String, customHosts: List<String> = emptyLi
         if (!host.isNullOrBlank() && host != "localhost" && !host.matches(Regex("^\\d+\\.\\d+\\.\\d+\\.\\d+$"))) {
             hosts.add(host)
             val apex = getApexDomain(host)
-            // Auto-add apex domain (strips www. or other subdomains)
-            if (host != apex) {
+            // Only auto-add apex/www variants when the URL is already the apex domain
+            // (e.g. example.com → also add www.example.com).
+            // Do NOT expand subdomains of shared hosting services like netlify.app, github.io,
+            // vercel.app, etc. — adding those hosts to the intent-filter causes Android App Links
+            // verification to fail because assetlinks.json can't exist on a domain the user doesn't own.
+            // Android rejects the entire intent-filter if ANY host in it fails verification.
+            if (host == apex) {
+                // Exact apex domain — also add www variant
+                val wwwApex = "www.$apex"
+                hosts.add(wwwApex)
+            } else if (host == "www.$apex") {
+                // www. variant — also add bare apex
                 hosts.add(apex)
             }
-            // Auto-add www variant of apex
-            val wwwApex = "www.$apex"
-            if (host != wwwApex) {
-                hosts.add(wwwApex)
-            }
+            // Otherwise it's a subdomain (e.g. shop2earn.netlify.app) — keep only the exact host
         }
     } catch (_: Exception) { }
 
@@ -2464,9 +2653,12 @@ fun WebApp.getSplashMediaPath(): String? {
  */
 sealed class BuildResult {
     data class Success(
-        val apkFile: File, 
+        val apkFile: File,
         val logPath: String? = null,
-        val analysisReport: ApkAnalyzer.AnalysisReport? = null
+        val analysisReport: ApkAnalyzer.AnalysisReport? = null,
+        val certFingerprint: String? = null,
+        val finalPackageName: String? = null,
+        val autoVerifyConfirmed: Boolean = false
     ) : BuildResult()
     data class Error(val message: String) : BuildResult()
 }

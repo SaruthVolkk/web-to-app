@@ -1629,6 +1629,9 @@ fun BuildApkDialog(
     var progress by remember { mutableIntStateOf(0) }
     var progressText by remember { mutableStateOf(Strings.preparing) }
     var analysisReport by remember { mutableStateOf<com.webtoapp.core.apkbuilder.ApkAnalyzer.AnalysisReport?>(null) }
+    var buildCertFingerprint by remember { mutableStateOf<String?>(null) }
+    var buildFinalPackageName by remember { mutableStateOf<String?>(null) }
+    var buildAutoVerifyConfirmed by remember { mutableStateOf<Boolean?>(null) }
     
     // Encryption配置状态
     var encryptionConfig by remember { 
@@ -1924,6 +1927,104 @@ fun BuildApkDialog(
                         }
                     }
                 }
+
+                // App Links assetlinks.json setup section
+                val fingerprint = buildCertFingerprint
+                val deepLinkEnabled = webApp.apkExportConfig?.deepLinkEnabled == true
+                if (!isBuilding && deepLinkEnabled && fingerprint != null) {
+                    val packageName = buildFinalPackageName
+                        ?: webApp.apkExportConfig?.customPackageName?.takeIf { it.isNotBlank() }
+                        ?: webApp.packageName?.takeIf { it.isNotBlank() }
+                        ?: "com.w2a.unknown"
+                    val assetLinksContent = """[{
+  "relation": ["delegate_permission/common.handle_all_urls"],
+  "target": {
+    "namespace": "android_app",
+    "package_name": "$packageName",
+    "sha256_cert_fingerprints": [
+      "$fingerprint"
+    ]
+  }
+}]"""
+                    HorizontalDivider()
+                    Spacer(Modifier.height(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Outlined.Link,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            Strings.appLinksSetupTitle,
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.weight(1f)
+                        )
+                        // autoVerify confirmation badge
+                        val avConfirmed = buildAutoVerifyConfirmed
+                        if (avConfirmed != null) {
+                            Spacer(Modifier.width(8.dp))
+                            Icon(
+                                if (avConfirmed) Icons.Outlined.CheckCircle else Icons.Outlined.Warning,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp),
+                                tint = if (avConfirmed) MaterialTheme.colorScheme.primary
+                                       else MaterialTheme.colorScheme.error
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                if (avConfirmed) "autoVerify ✓" else "autoVerify ✗",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (avConfirmed) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        Strings.appLinksSetupDesc,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                MaterialTheme.colorScheme.surfaceVariant,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .padding(10.dp)
+                    ) {
+                        Text(
+                            assetLinksContent,
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+                    var copied by remember { mutableStateOf(false) }
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = {
+                            clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(assetLinksContent))
+                            copied = true
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(
+                            if (copied) Icons.Outlined.CheckCircle else Icons.Outlined.ContentCopy,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (copied) Strings.appLinksCopied else Strings.appLinksCopyButton)
+                    }
+                }
             }
         },
         confirmButton = {
@@ -1950,6 +2051,9 @@ fun BuildApkDialog(
                             when (result) {
                                 is BuildResult.Success -> {
                                     analysisReport = result.analysisReport
+                                    buildCertFingerprint = result.certFingerprint
+                                    buildFinalPackageName = result.finalPackageName
+                                    buildAutoVerifyConfirmed = result.autoVerifyConfirmed
                                     isBuilding = false
                                     // 直接安装
                                     apkBuilder.installApk(result.apkFile)

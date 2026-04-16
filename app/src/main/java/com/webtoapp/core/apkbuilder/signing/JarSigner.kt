@@ -88,6 +88,16 @@ class JarSigner(private val context: Context) {
     }
     
     /**
+     * 获取签名证书 SHA-256 指纹（用于 assetlinks.json）
+     * 格式：AA:BB:CC:DD:...（大写十六进制，冒号分隔）
+     */
+    fun getCertFingerprintHex(): String? {
+        val cert = certificate ?: return null
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(cert.encoded)
+        return digest.joinToString(":") { "%02X".format(it) }
+    }
+
+    /**
      * 获取签名证书信息
      */
     fun getCertificateInfo(): String? {

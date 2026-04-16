@@ -39,7 +39,7 @@ class AxmlRebuilder {
         private const val ATTR_ENABLED = 0x0101000e
         private const val ATTR_SCHEME = 0x01010027
         private const val ATTR_HOST = 0x01010028
-        private const val ATTR_AUTO_VERIFY = 0x0101045e
+        private const val ATTR_AUTO_VERIFY = 0x0101464c
         
         // Pre-compiled regex for class name detection (avoid creating per string pool entry)
         private val CLASS_NAME_REGEX = Regex("^[A-Z][a-zA-Z0-9]*$")
@@ -530,11 +530,25 @@ class AxmlRebuilder {
         val finalAndroidNsIndex = getOrAddString(parsed.stringPool, "http://schemas.android.com/apk/res/android")
         val finalIntentFilterNameIndex = getOrAddString(parsed.stringPool, "intent-filter")
 
+        // Diagnostic: log the resolved attribute indices and verify the resource map entry
+        AppLogger.d(TAG, "AppLinks diagnostic: resourceMap.size=${parsed.resourceMap!!.size}, " +
+            "finalAutoVerifyAttrIndex=$finalAutoVerifyAttrIndex, " +
+            "resourceMap[autoVerify]=0x${"%08X".format(parsed.resourceMap!![finalAutoVerifyAttrIndex])}, " +
+            "finalSchemeAttrIndex=$finalSchemeAttrIndex, " +
+            "finalHostAttrIndex=$finalHostAttrIndex, " +
+            "finalAndroidNsIndex=$finalAndroidNsIndex, " +
+            "finalIntentFilterNameIndex=$finalIntentFilterNameIndex, " +
+            "androidNsString=${parsed.stringPool.strings.getOrNull(finalAndroidNsIndex)?.take(30)}")
+
         val newChunks = mutableListOf<Chunk>()
 
         // 1. Separate intent-filter for HTTP/HTTPS hosts (with autoVerify="true" for App Links)
         if (hosts.isNotEmpty()) {
-            newChunks.add(buildIntentFilterWithAutoVerify(finalAndroidNsIndex, finalIntentFilterNameIndex, finalAutoVerifyAttrIndex))
+            val ifChunk = buildIntentFilterWithAutoVerify(finalAndroidNsIndex, finalIntentFilterNameIndex, finalAutoVerifyAttrIndex)
+            // Log hex bytes of the autoVerify attribute (bytes 36-55 of the chunk)
+            val attrHex = ifChunk.data.drop(36).take(20).joinToString(" ") { "%02X".format(it) }
+            AppLogger.d(TAG, "AppLinks diagnostic: intent-filter chunk size=${ifChunk.data.size}, autoVerify attr bytes: $attrHex")
+            newChunks.add(ifChunk)
             
             val actionNameIndex2 = getOrAddString(parsed.stringPool, "action")
             val categoryNameIndex2 = getOrAddString(parsed.stringPool, "category")

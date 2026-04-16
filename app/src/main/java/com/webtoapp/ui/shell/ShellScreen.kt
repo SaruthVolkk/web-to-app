@@ -9,12 +9,19 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import com.webtoapp.WebToAppApplication
 import com.webtoapp.core.logging.AppLogger
 import com.webtoapp.core.shell.ShellConfig
@@ -118,6 +125,19 @@ fun ShellScreen(
     var showSplash by remember { mutableStateOf(config.splashEnabled && splashMediaExists) }
     var splashCountdown by remember { mutableIntStateOf(if (config.splashEnabled && splashMediaExists) config.splashDuration else 0) }
     var originalOrientation by remember { mutableIntStateOf(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED) }
+
+    // App Links setup banner: shown once when deepLink is enabled and domain not yet verified as default
+    val appSigningFingerprint = remember { getAppSigningFingerprint(context) }
+    var showAppLinksBanner by remember {
+        val prefs = context.getSharedPreferences("shell_prefs", android.content.Context.MODE_PRIVATE)
+        val dismissed = prefs.getBoolean("app_links_banner_dismissed", false)
+        mutableStateOf(
+            config.deepLinkEnabled &&
+            config.deepLinkHosts.isNotEmpty() &&
+            !dismissed &&
+            !isAppLinksVerified(context)
+        )
+    }
     
     // Handle启动画面横屏
     LaunchedEffect(showSplash) {
@@ -499,5 +519,200 @@ fun ShellScreen(
         )
     }
     
+    // App Links setup banner
+    if (showAppLinksBanner) {
+        AppLinksBanner(
+            signingFingerprint = appSigningFingerprint,
+            onEnable = {
+                showAppLinksBanner = false
+                openAppDefaultSettings(context)
+            },
+            onDismiss = {
+                showAppLinksBanner = false
+                context.getSharedPreferences("shell_prefs", android.content.Context.MODE_PRIVATE)
+                    .edit().putBoolean("app_links_banner_dismissed", true).apply()
+            }
+        )
+    }
+
     } // 关闭外层 Box
+}
+
+/**
+ * Returns true if the app is already the verified/selected default handler for its domains,
+ * meaning the banner does not need to be shown.
+ *
+ * On Android 12+ (API 31+) the user MUST manually enable "Supported web addresses" in Settings
+ * even with a valid assetlinks.json, so we use DomainVerificationManager to check.
+ * Below Android 12, autoVerify=true handles verification automatically — no manual step needed.
+ */
+private fun isAppLinksVerified(context: android.content.Context): Boolean {
+    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.S) {
+        // Pre-Android-12: autoVerify handles it automatically, no manual step required
+        return true
+    }
+    return try {
+        val mgr = context.getSystemService(android.content.pm.verify.domain.DomainVerificationManager::class.java)
+            ?: return false
+        val info = mgr.getDomainVerificationUserState(context.packageName) ?: return false
+        // Check if any domain is selected (user-selected) or verified (autoVerify passed)
+        val states = info.hostToStateMap
+        states.values.any { state ->
+            state == android.content.pm.verify.domain.DomainVerificationUserState.DOMAIN_STATE_SELECTED ||
+            state == android.content.pm.verify.domain.DomainVerificationUserState.DOMAIN_STATE_VERIFIED
+        }
+    } catch (_: Exception) {
+        false
+    }
+}
+
+/**
+ * Returns the SHA-256 fingerprint of this APK's signing certificate, formatted as AA:BB:CC:...
+ * This is what must appear in assetlinks.json for App Links verification to pass.
+ */
+@Suppress("DEPRECATION")
+private fun getAppSigningFingerprint(context: android.content.Context): String? {
+    return try {
+        val pm = context.packageManager
+        val signingInfo = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            val info = pm.getPackageInfo(context.packageName, android.content.pm.PackageManager.GET_SIGNING_CERTIFICATES)
+            info.signingInfo?.apkContentsSigners?.firstOrNull()
+        } else {
+            val info = pm.getPackageInfo(context.packageName, android.content.pm.PackageManager.GET_SIGNATURES)
+            @Suppress("DEPRECATION")
+            info.signatures?.firstOrNull()
+        } ?: return null
+
+        val cert = java.security.cert.CertificateFactory.getInstance("X509")
+            .generateCertificate(signingInfo.toByteArray().inputStream())
+        val digest = java.security.MessageDigest.getInstance("SHA-256").digest(cert.encoded)
+        digest.joinToString(":") { "%02X".format(it) }
+    } catch (_: Exception) {
+        null
+    }
+}
+
+/**
+ * Opens the system screen where the user can enable "Supported web addresses" for this app.
+ * Uses ACTION_APP_OPEN_BY_DEFAULT_SETTINGS on Android 12+, falls back to app info screen.
+ */
+private fun openAppDefaultSettings(context: android.content.Context) {
+    try {
+        val intent = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+            android.content.Intent(
+                android.provider.Settings.ACTION_APP_OPEN_BY_DEFAULT_SETTINGS,
+                android.net.Uri.parse("package:${context.packageName}")
+            )
+        } else {
+            android.content.Intent(
+                android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                android.net.Uri.parse("package:${context.packageName}")
+            )
+        }
+        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+        context.startActivity(intent)
+    } catch (_: Exception) { }
+}
+
+/**
+ * Banner shown once to guide user to enable App Links in system settings.
+ * Also shows the APK signing fingerprint so the user can verify it matches assetlinks.json.
+ */
+@Composable
+private fun BoxScope.AppLinksBanner(
+    signingFingerprint: String?,
+    onEnable: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val clipboardManager = androidx.compose.ui.platform.LocalClipboardManager.current
+    var fingerprintCopied by remember { mutableStateOf(false) }
+
+    androidx.compose.material3.Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .align(Alignment.TopCenter)
+            .padding(12.dp),
+        colors = androidx.compose.material3.CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer
+        ),
+        elevation = androidx.compose.material3.CardDefaults.cardElevation(defaultElevation = 4.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    text = Strings.appLinksSetupTitle,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                androidx.compose.material3.IconButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    androidx.compose.material3.Icon(
+                        Icons.Outlined.Close,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                }
+            }
+            Text(
+                text = Strings.appLinksBannerDesc,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
+            // Show this APK's signing fingerprint so the user can verify it matches assetlinks.json
+            if (signingFingerprint != null) {
+                Text(
+                    text = Strings.appLinksFingerprintLabel,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable {
+                            clipboardManager.setText(androidx.compose.ui.text.AnnotatedString(signingFingerprint))
+                            fingerprintCopied = true
+                        }
+                        .background(
+                            MaterialTheme.colorScheme.surface.copy(alpha = 0.4f),
+                            androidx.compose.foundation.shape.RoundedCornerShape(6.dp)
+                        )
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = signingFingerprint,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            fontSize = androidx.compose.ui.unit.TextUnit(9f, androidx.compose.ui.unit.TextUnitType.Sp)
+                        ),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Icon(
+                        if (fingerprintCopied) Icons.Outlined.CheckCircle else Icons.Outlined.ContentCopy,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+            androidx.compose.material3.FilledTonalButton(
+                onClick = onEnable,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(Strings.appLinksBannerButton)
+            }
+        }
+    }
 }
